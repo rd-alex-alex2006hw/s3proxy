@@ -27,6 +27,7 @@ import java.security.NoSuchAlgorithmException;
 import java.security.cert.X509Certificate;
 import java.util.Date;
 import java.util.List;
+import java.util.Map;
 import java.util.Random;
 import java.util.concurrent.TimeUnit;
 
@@ -66,10 +67,13 @@ import com.amazonaws.services.s3.model.UploadPartRequest;
 import com.amazonaws.services.s3.model.UploadPartResult;
 import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.Maps;
 import com.google.common.io.ByteSource;
 
 import org.assertj.core.api.Fail;
 
+import org.jclouds.ContextBuilder;
+import org.jclouds.blobstore.BlobStore;
 import org.jclouds.blobstore.BlobStoreContext;
 
 import org.junit.After;
@@ -498,6 +502,69 @@ public final class S3AwsSdkTest {
                 contentType);
         assertThat(reponseMetadata.getHttpExpiresDate().getTime())
             .isEqualTo(expiresTime);
+    }
+
+    @Test
+    public void testBlobStoreLocator() throws Exception {
+        final BlobStore blobStore1 = ContextBuilder
+                .newBuilder("transient")
+                .credentials("identity1", "credential1")
+                .build(BlobStoreContext.class)
+                .getBlobStore();
+        blobStore1.createContainerInLocation(null, containerName);
+
+        final BlobStore blobStore2 = ContextBuilder
+                .newBuilder("transient")
+                .credentials("identity2", "credential2")
+                .build(BlobStoreContext.class)
+                .getBlobStore();
+        blobStore2.createContainerInLocation(null, containerName);
+
+        s3Proxy.setBlobStoreLocator(new BlobStoreLocator() {
+            @Override
+            public Map.Entry<String, BlobStore> locateBlobStore(
+                    String identity, String container, String blob) {
+                if (identity.equals("identity1")) {
+                    return Maps.immutableEntry("credential1", blobStore1);
+                } else if (identity.equals("identity2")) {
+                    return Maps.immutableEntry("credential2", blobStore2);
+                } else {
+                    return null;
+                }
+            }
+        });
+
+        client = new AmazonS3Client(new BasicAWSCredentials(
+                "identity1", "credential1"));
+        client.setEndpoint(s3Endpoint.toString());
+
+        ObjectMetadata metadata = new ObjectMetadata();
+        metadata.setContentLength(BYTE_SOURCE.size());
+        client.putObject(containerName, "foo",
+                BYTE_SOURCE.openStream(), metadata);
+
+        S3Object object = client.getObject(containerName, "foo");
+        assertThat(object).isNotNull();
+
+        client = new AmazonS3Client(new BasicAWSCredentials(
+                "identity2", "credential2"));
+        client.setEndpoint(s3Endpoint.toString());
+
+        try {
+            client.getObject(containerName, "foo");
+        } catch (AmazonS3Exception e) {
+            assertThat(e.getErrorCode()).isEqualTo("NoSuchKey");
+        }
+
+        client = new AmazonS3Client(new BasicAWSCredentials(
+                "identity3", "credential3"));
+        client.setEndpoint(s3Endpoint.toString());
+
+        try {
+            client.getObject(containerName, "foo");
+        } catch (AmazonS3Exception e) {
+            assertThat(e.getErrorCode()).isEqualTo("InvalidAccessKeyId");
+        }
     }
 
     private static final class NullX509TrustManager
